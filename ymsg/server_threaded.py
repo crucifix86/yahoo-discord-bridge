@@ -34,6 +34,7 @@ class YMSGSession:
         self.username: Optional[str] = None
         self.authenticated = False
         self.lock = threading.Lock()
+        self.protocol_version = 16  # Default to v16, updated on first packet
 
     def send_packet(self, service: int, status: int = 0,
                     data: Dict[str, str] = None):
@@ -44,11 +45,13 @@ class YMSGSession:
             session_id=self.session_id,
             data=data or {}
         )
+        # Use the client's protocol version
+        packet.version = self.protocol_version
         raw = encode_packet(packet)
         with self.lock:
             try:
                 self.sock.sendall(raw)
-                logger.debug(f"Sent to {self.username or self.address}: {packet}")
+                logger.debug(f"Sent to {self.username or self.address}: service={service}")
             except Exception as e:
                 logger.error(f"Error sending to {self.username}: {e}")
 
@@ -224,9 +227,18 @@ class YMSGServerThreaded:
 
     def _handle_packet(self, session: YMSGSession, packet: YMSGPacket):
         """Route packet to appropriate handler"""
+        # Track client's protocol version
+        if packet.version:
+            session.protocol_version = packet.version
+            if packet.version == 16:
+                logger.debug(f"Client {session.address} using YMSG v16 (YM9+)")
+            elif packet.version in (9, 10, 11):
+                logger.debug(f"Client {session.address} using YMSG v{packet.version} (YM5.x)")
+
         handlers = {
             Service.VERIFY: self._handle_verify,
             Service.AUTH: self._handle_auth,
+            Service.AUTH_V16: self._handle_auth_v16,  # YM9+ auth
             Service.AUTHRESP: self._handle_authresp,
             Service.PING: self._handle_ping,
             Service.MESSAGE: self._handle_message,
@@ -251,12 +263,12 @@ class YMSGServerThreaded:
         session.send_packet(Service.VERIFY, status=1)
 
     def _handle_auth(self, session: YMSGSession, packet: YMSGPacket):
-        """Handle auth request (service 87)"""
+        """Handle auth request (service 87) - YM5.x style"""
         username = packet.data.get('1', '')
         session.username = username
         self.username_to_session[username] = session.session_id
 
-        logger.info(f"Auth request from {username}")
+        logger.info(f"Auth request from {username} (YM5.x style)")
 
         # Send challenge
         session.send_packet(
@@ -267,6 +279,40 @@ class YMSGServerThreaded:
                 '94': 'DISCORD_BRIDGE_CHALLENGE'
             }
         )
+
+    def _handle_auth_v16(self, session: YMSGSession, packet: YMSGPacket):
+        """Handle auth request (service 57) - YM9+ YMSG v16 style
+
+        YM9 sends service 57 with username, we respond with:
+        - key 1: username
+        - key 13: auth method (2 = token-based)
+        - key 94: challenge string
+
+        Then YM9 goes to HTTPS to get token, comes back with service 84.
+        """
+        username = packet.data.get('1', '')
+        session.username = username
+        self.username_to_session[username] = session.session_id
+
+        logger.info(f"Auth request from {username} (YM9 v16 style)")
+
+        # Generate a challenge string
+        import hashlib
+        import time
+        challenge = hashlib.md5(f"{username}{time.time()}".encode()).hexdigest()
+
+        # Send challenge response
+        # Key 13 = 2 means token-based auth (YM9 style)
+        session.send_packet(
+            Service.AUTH_V16,
+            status=1,
+            data={
+                '1': username,
+                '13': '2',  # Auth method: token-based
+                '94': challenge  # Challenge string
+            }
+        )
+        logger.info(f"Sent v16 auth challenge to {username}")
 
     def _handle_authresp(self, session: YMSGSession, packet: YMSGPacket):
         """Handle auth response (service 84) - complete login"""

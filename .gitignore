@@ -17,6 +17,9 @@ venv/
 # Config with secrets
 config.json
 
+# SSL certificates
+*.pem
+
 # Installers and binaries
 installer/
 ayyhoo/

@@ -110,6 +110,7 @@ class YahooDiscordBridgeApp:
         self.bridge_thread = None
         self.running = False
         self.config = self.load_config()
+        self.http_server = None  # Yahoo HTTP/HTTPS server for YM9
 
         # Build UI
         self.create_ui()
@@ -593,8 +594,14 @@ Once logged in, press F12 to open Developer Tools, then:
             # Import bridge modules - use threaded YMSG server for Wine compatibility
             from ymsg.server_threaded import YMSGServerThreaded
             from discord_client.client import DiscordBridge
+            from yahoo_http_server import YahooHTTPServer
 
             logger.info("Modules imported successfully")
+
+            # Start HTTP/HTTPS server for YM9+ authentication
+            logger.info("Starting Yahoo HTTP/HTTPS server for YM9 auth...")
+            self.http_server = YahooHTTPServer(http_port=80, https_port=443)
+            self.http_server.start()
 
             # Create YMSG server (threaded, starts immediately)
             logger.info("Creating YMSG server on 127.0.0.1:5050...")
@@ -675,6 +682,14 @@ Once logged in, press F12 to open Developer Tools, then:
         self.start_btn.config(text="▶ Start Bridge")
         self.conn_status.config(text="Stopped", foreground='gray')
         self.token_entry.config(state='normal')
+
+        # Stop HTTP/HTTPS server
+        if self.http_server:
+            try:
+                self.http_server.stop()
+            except:
+                pass
+            self.http_server = None
 
     def on_close(self):
         """Handle window close"""

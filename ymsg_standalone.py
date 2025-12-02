@@ -4,6 +4,8 @@ Standalone YMSG Server - Runs on native Linux
 
 This handles Yahoo Messenger client connections. The Discord side
 runs separately under Wine.
+
+Supports both YM5.x (YMSG v10) and YM9+ (YMSG v16).
 """
 
 import socket
@@ -13,6 +15,7 @@ import json
 import time
 import os
 import sys
+import hashlib
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -22,6 +25,7 @@ from ymsg.protocol import (
     YMSG_HEADER_SIZE, Service, Status
 )
 from mapping.smileys import yahoo_to_discord, strip_yahoo_formatting
+from yahoo_http_server import YahooHTTPServer
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -38,6 +42,7 @@ class YMSGSession:
         self.username = None
         self.authenticated = False
         self.lock = threading.Lock()
+        self.protocol_version = 16  # Default to v16, updated on first packet
 
     def send_packet(self, service, status=0, data=None):
         packet = YMSGPacket(
@@ -46,6 +51,7 @@ class YMSGSession:
             session_id=self.session_id,
             data=data or {}
         )
+        packet.version = self.protocol_version  # Match client version
         raw = encode_packet(packet)
         with self.lock:
             try:
@@ -166,9 +172,18 @@ class StandaloneYMSGServer:
         return data
 
     def _handle_packet(self, session, packet):
+        # Track client protocol version
+        if packet.version:
+            session.protocol_version = packet.version
+            if packet.version == 16:
+                logger.debug(f"Client using YMSG v16 (YM9+)")
+            elif packet.version in (9, 10, 11):
+                logger.debug(f"Client using YMSG v{packet.version} (YM5.x)")
+
         handlers = {
             Service.VERIFY: self._handle_verify,
             Service.AUTH: self._handle_auth,
+            Service.AUTH_V16: self._handle_auth_v16,  # YM9+ auth (service 57)
             Service.AUTHRESP: self._handle_authresp,
             Service.PING: self._handle_ping,
             Service.MESSAGE: self._handle_message,
@@ -186,10 +201,11 @@ class StandaloneYMSGServer:
         session.send_packet(Service.VERIFY, status=1)
 
     def _handle_auth(self, session, packet):
+        """Handle YM5.x auth (service 87)"""
         username = packet.data.get('1', '')
         session.username = username
         self.username_to_session[username] = session.session_id
-        logger.info(f"Auth request from {username}")
+        logger.info(f"Auth request from {username} (YM5.x style)")
 
         session.send_packet(
             Service.AUTH,
@@ -199,6 +215,28 @@ class StandaloneYMSGServer:
                 '94': 'DISCORD_BRIDGE_CHALLENGE'
             }
         )
+
+    def _handle_auth_v16(self, session, packet):
+        """Handle YM9+ auth (service 57)"""
+        username = packet.data.get('1', '')
+        session.username = username
+        self.username_to_session[username] = session.session_id
+        logger.info(f"Auth request from {username} (YM9 v16 style)")
+
+        # Generate challenge
+        challenge = hashlib.md5(f"{username}{time.time()}".encode()).hexdigest()
+
+        # Key 13 = 2 means token-based auth
+        session.send_packet(
+            Service.AUTH_V16,
+            status=1,
+            data={
+                '1': username,
+                '13': '2',
+                '94': challenge
+            }
+        )
+        logger.info(f"Sent v16 auth challenge to {username}")
 
     def _handle_authresp(self, session, packet):
         username = packet.data.get('1', session.username)
@@ -253,13 +291,31 @@ class StandaloneYMSGServer:
 
 
 if __name__ == '__main__':
+    print("=" * 60)
+    print("Yahoo Messenger Standalone Server")
+    print("Supports YM 5.x and YM 9.x")
+    print("=" * 60)
+
+    # Start HTTP/HTTPS server for YM9 authentication
+    print("\nStarting HTTP/HTTPS server for YM9 auth...")
+    http_server = YahooHTTPServer(http_port=80, https_port=443)
+    http_server.start()
+
+    # Start YMSG server
+    print("\nStarting YMSG server on port 5050...")
     server = StandaloneYMSGServer()
     thread = server.start()
 
-    print("YMSG Server running. Press Ctrl+C to stop.")
+    print("\nServers running. Press Ctrl+C to stop.")
+    print("  - HTTP:  127.0.0.1:80  (YM9 capacity)")
+    print("  - HTTPS: 127.0.0.1:443 (YM9 auth)")
+    print("  - YMSG:  127.0.0.1:5050 (all versions)")
+    print()
+
     try:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
         print("\nStopping...")
         server.running = False
+        http_server.stop()

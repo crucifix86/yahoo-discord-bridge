@@ -19,7 +19,9 @@ from typing import Dict, List, Optional, Tuple
 YMSG_MAGIC = b'YMSG'
 YMSG_HEADER_SIZE = 20
 YMSG_SEPARATOR = b'\xc0\x80'
-YMSG_VERSION = 10  # YM 9 uses version 10
+YMSG_VERSION_10 = 10  # YM 5.x uses version 10
+YMSG_VERSION_16 = 16  # YM 9.x uses version 16
+YMSG_VERSION = 16     # Default to v16 for compatibility
 
 
 class YMSGPacket:
@@ -168,9 +170,10 @@ class Service:
     IDACT = 7
     IDDEACT = 8
     PING = 18
-    AUTHRESP = 84
+    AUTH_V16 = 57      # YM9+ initial auth (YMSG v16)
+    AUTHRESP = 84      # Auth response (both YM5 and YM9)
     LIST = 85
-    AUTH = 87
+    AUTH = 87          # YM5.x initial auth
     ADDBUDDY = 131
     REMBUDDY = 132
     NOTIFY = 75

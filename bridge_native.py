@@ -42,14 +42,16 @@ class YMSGSession:
         self.username = None
         self.authenticated = False
         self.lock = threading.Lock()
+        self.protocol_version = 10  # Default to v10 for YM 5.x
 
-    def send_packet(self, service, status=0, data=None):
+    def send_packet(self, service, status=0, data=None, session_id=None):
         packet = YMSGPacket(
             service=service,
             status=status,
-            session_id=self.session_id,
+            session_id=session_id if session_id is not None else self.session_id,
             data=data or {}
         )
+        packet.version = self.protocol_version  # Use client's version
         raw = encode_packet(packet)
         with self.lock:
             try:
@@ -72,7 +74,7 @@ class NativeBridge:
         self.discord_token = discord_token
 
         # YMSG Server
-        self.host = '127.0.0.1'
+        self.host = '0.0.0.0'  # Listen on all interfaces for remote access
         self.port = 5050
         self.sessions = {}
         self.sessions_lock = threading.Lock()
@@ -160,6 +162,15 @@ class NativeBridge:
 
                 packet = decode_packet(raw)
                 if packet:
+                    # Track client's protocol version
+                    # Some clients send version in different byte order
+                    version = packet.version
+                    if version > 20:
+                        # Byte order issue - extract actual version
+                        version = version >> 8  # High byte is the real version
+                    if version:
+                        session.protocol_version = version
+                        logger.info(f"Client using YMSG v{version}")
                     logger.debug(f"Received: service={packet.service}")
                     self._handle_packet(session, packet)
 
@@ -262,18 +273,21 @@ class NativeBridge:
 
     def _handle_message(self, session, packet):
         """Handle message from YM -> Discord"""
+        # Log all keys in received packet for debugging
+        logger.info(f"Received MESSAGE packet keys: {list(packet.data.keys())}")
+        logger.info(f"Received MESSAGE packet data: {packet.data}")
+
         to_user = packet.data.get('5', '')
-        message = packet.data.get('14', '')
-        message = strip_yahoo_formatting(message)
+        raw_message = packet.data.get('14', '')
+        message = strip_yahoo_formatting(raw_message)
         message = yahoo_to_discord(message)
 
         logger.info(f"Message from {session.username} to {to_user}: {message}")
 
         # Forward to Discord
-        if to_user in self.friend_id_map and self.discord_client:
-            user_id = self.friend_id_map[to_user]
+        if to_user in self.friend_users and self.discord_client:
             asyncio.run_coroutine_threadsafe(
-                self._send_discord_dm(user_id, message),
+                self._send_discord_dm(to_user, message),
                 self.discord_loop
             )
 
@@ -318,7 +332,9 @@ class NativeBridge:
 
             async def on_presence_update(client_self, before, after):
                 # Handle friend status changes
-                name = client_self.bridge._get_ymsg_name(after)
+                # after can be a Relationship object - get the user from it
+                user = after.user if hasattr(after, 'user') else after
+                name = client_self.bridge._get_ymsg_name(user)
                 if name in client_self.bridge.friend_status:
                     old_status = client_self.bridge.friend_status.get(name)
                     new_status = client_self.bridge._discord_status_to_ymsg(after.status)
@@ -341,12 +357,14 @@ class NativeBridge:
     def _load_friends(self, client):
         """Load friends from Discord"""
         friends = []
+        self.friend_users = {}  # Store user objects for sending
         for relationship in client.relationships:
             if relationship.type.name == 'friend':
                 user = relationship.user
                 name = self._get_ymsg_name(user)
                 friends.append(name)
                 self.friend_id_map[name] = user.id
+                self.friend_users[name] = user  # Store user object
                 # Default to AVAILABLE - presence updates will correct this
                 self.friend_status[name] = Status.AVAILABLE
 
@@ -372,32 +390,42 @@ class NativeBridge:
         }
         return status_map.get(str(status), Status.AVAILABLE)
 
-    async def _send_discord_dm(self, user_id, message):
+    async def _send_discord_dm(self, to_name, message):
         """Send a DM to a Discord user"""
         try:
-            user = await self.discord_client.fetch_user(user_id)
-            dm = await user.create_dm()
-            await dm.send(message)
-            logger.info(f"Sent Discord DM to {user.name}")
+            if to_name in self.friend_users:
+                user = self.friend_users[to_name]
+                await user.send(message)
+                logger.info(f"Sent Discord DM to {user.name}")
+            else:
+                logger.error(f"User {to_name} not found in friend list")
         except Exception as e:
             logger.error(f"Failed to send Discord DM: {e}")
 
     def _forward_to_ymsg(self, sender, message):
         """Forward a message to connected YM clients"""
+        import time as time_module
         with self.sessions_lock:
+            logger.info(f"Forwarding to {len(self.sessions)} sessions")
             for session in self.sessions.values():
                 if session.authenticated:
+                    logger.info(f"Sending MESSAGE to {session.username} from {sender} (v{session.protocol_version})")
+                    # For INCOMING messages: Key 4 = sender, Key 5 = recipient (you)
+                    # This should route to the correct conversation window
+                    formatted_msg = f'<font face="Tahoma">{message}'
                     session.send_packet(
                         Service.MESSAGE,
                         status=1,
                         data={
                             '4': sender,
                             '5': session.username,
-                            '14': message,
+                            '14': formatted_msg,
+                            '97': '1',
                             '63': ';0',
                             '64': '0',
-                            '97': '1'
-                        }
+                            '1002': '1'
+                        },
+                        session_id=session.session_id
                     )
 
     def _notify_friend_online(self, friend, status):
