@@ -201,11 +201,26 @@ class NativeBridge:
             Service.PING: self._handle_ping,
             Service.MESSAGE: self._handle_message,
             Service.LOGOFF: self._handle_logoff,
+            # Conference services
+            Service.CONFINVITE: self._handle_conference,
+            Service.CONFLOGON: self._handle_conference,
+            Service.CONFDECLINE: self._handle_conference,
+            Service.CONFLOGOFF: self._handle_conference,
+            Service.CONFMSG: self._handle_confmsg,
+            # Chat room services
+            Service.CHATONLINE: self._handle_chat,
+            Service.CHATGOTO: self._handle_chat,
+            Service.CHATJOIN: self._handle_chatjoin,
+            Service.CHATLEAVE: self._handle_chat,
+            Service.CHATMSG: self._handle_chatmsg,
         }
 
         handler = handlers.get(packet.service)
         if handler:
             handler(session, packet)
+        else:
+            # Log unknown services for debugging
+            logger.info(f"UNKNOWN SERVICE {packet.service}: status={packet.status} data={packet.data}")
 
     def _handle_verify(self, session, packet):
         logger.info("VERIFY handshake")
@@ -295,6 +310,105 @@ class NativeBridge:
         logger.info(f"User logging off")
         session.close()
 
+    # Conference handlers (for 1:1 group chats / conferences)
+    def _handle_conference(self, session, packet):
+        """Handle conference invite/join/decline/leave - log for debugging"""
+        logger.info(f"CONFERENCE service={packet.service} status={packet.status} data={packet.data}")
+        # Conference keys typically:
+        # 1 = your username, 50 = conference name, 51 = invited users, 52 = joined users
+        # 57 = inviter, 58 = message
+
+    def _handle_confmsg(self, session, packet):
+        """Handle conference message"""
+        logger.info(f"CONFMSG: {packet.data}")
+        conf_name = packet.data.get('57', '')  # Conference ID
+        sender = packet.data.get('1', session.username)
+        message = packet.data.get('14', '')
+        logger.info(f"Conference {conf_name} message from {sender}: {message}")
+
+    # Chat room handlers
+    def _handle_chat(self, session, packet):
+        """Handle chat room operations - log for debugging"""
+        logger.info(f"CHAT service={packet.service} status={packet.status} data={packet.data}")
+        # Chat room keys typically:
+        # 1 = username, 104 = room name, 109 = user ID, 117 = message
+
+    def _handle_chatjoin(self, session, packet):
+        """Handle chat room join request"""
+        logger.info(f"CHATJOIN request: {packet.data}")
+        room_name = packet.data.get('104', packet.data.get('57', ''))
+        logger.info(f"User wants to join room: {room_name}")
+
+        # For now, acknowledge the join with the room info
+        # This will need to map to a Discord channel
+        if room_name and self.discord_client:
+            # Try to find matching Discord channel
+            asyncio.run_coroutine_threadsafe(
+                self._handle_discord_room_join(session, room_name),
+                self.discord_loop
+            )
+
+    def _handle_chatmsg(self, session, packet):
+        """Handle chat room message"""
+        logger.info(f"CHATMSG: {packet.data}")
+        room_name = packet.data.get('104', packet.data.get('57', ''))
+        message = packet.data.get('117', packet.data.get('14', ''))
+        sender = packet.data.get('109', session.username)
+        logger.info(f"Room {room_name} message from {sender}: {message}")
+
+        # Forward to Discord channel
+        if room_name and message and self.discord_client:
+            asyncio.run_coroutine_threadsafe(
+                self._send_discord_channel_msg(room_name, message),
+                self.discord_loop
+            )
+
+    async def _handle_discord_room_join(self, session, room_name):
+        """Handle joining a Discord channel as a Yahoo chat room"""
+        # Find matching channel in Discord guilds
+        channel = None
+        for guild in self.discord_client.guilds:
+            for ch in guild.text_channels:
+                # Match by channel name (case-insensitive)
+                if ch.name.lower() == room_name.lower():
+                    channel = ch
+                    break
+            if channel:
+                break
+
+        if channel:
+            logger.info(f"Found Discord channel: {channel.name} in {channel.guild.name}")
+            # Send join confirmation
+            # Key 104 = room, 109 = user, 141 = room topic
+            session.send_packet(
+                Service.CHATJOIN,
+                status=1,
+                data={
+                    '1': session.username,
+                    '104': room_name,
+                    '109': session.username,
+                    '141': f"Discord: {channel.guild.name}",
+                    '142': '0'  # user count placeholder
+                },
+                session_id=session.session_id
+            )
+            # Store channel mapping
+            if not hasattr(self, 'channel_map'):
+                self.channel_map = {}
+            self.channel_map[room_name.lower()] = channel
+        else:
+            logger.info(f"No Discord channel found matching: {room_name}")
+
+    async def _send_discord_channel_msg(self, room_name, message):
+        """Send message to Discord channel"""
+        if hasattr(self, 'channel_map') and room_name.lower() in self.channel_map:
+            channel = self.channel_map[room_name.lower()]
+            try:
+                await channel.send(message)
+                logger.info(f"Sent to Discord channel {channel.name}: {message}")
+            except Exception as e:
+                logger.error(f"Failed to send to channel: {e}")
+
     def _encode_friend_groups(self):
         lines = []
         for group, friends in self.friend_groups.items():
@@ -370,6 +484,9 @@ class NativeBridge:
 
         self.friend_groups = {"Friends": friends}
         logger.info(f"Loaded {len(friends)} Discord friends: {friends[:5]}...")
+
+        # Save Discord guilds for chat room list
+        self._save_guilds(client)
 
     def _get_ymsg_name(self, user):
         """Convert Discord user to YMSG-friendly name"""
@@ -458,6 +575,29 @@ class NativeBridge:
                             '10': str(Status.OFFLINE)
                         }
                     )
+
+    def _save_guilds(self, client):
+        """Save Discord guilds to JSON for HTTP server to read"""
+        guilds_data = []
+        for guild in client.guilds:
+            channels = []
+            for channel in guild.text_channels:
+                channels.append({
+                    'id': str(channel.id),
+                    'name': channel.name,
+                    'topic': channel.topic or ''
+                })
+            guilds_data.append({
+                'id': str(guild.id),
+                'name': guild.name,
+                'channels': channels
+            })
+
+        # Save to JSON file
+        guilds_file = os.path.join(os.path.dirname(__file__), 'discord_guilds.json')
+        with open(guilds_file, 'w') as f:
+            json.dump(guilds_data, f, indent=2)
+        logger.info(f"Saved {len(guilds_data)} Discord guilds to {guilds_file}")
 
 
 def main():

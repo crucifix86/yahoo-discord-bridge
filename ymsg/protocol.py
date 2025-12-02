@@ -170,17 +170,34 @@ class Service:
     IDACT = 7
     IDDEACT = 8
     PING = 18
-    AUTH_V16 = 57      # YM9+ initial auth (YMSG v16)
-    AUTHRESP = 84      # Auth response (both YM5 and YM9)
-    LIST = 85
-    AUTH = 87          # YM5.x initial auth
-    ADDBUDDY = 131
-    REMBUDDY = 132
+    # Legacy Chat (services 30-32)
+    CHATLOGON = 30      # 0x1e - Legacy chat login
+    CHATLOGOFF = 31     # 0x1f - Legacy chat logout
+    CHATMSG_LEGACY = 32 # 0x20 - Legacy chat message
+    AUTH_V16 = 57       # YM9+ initial auth (YMSG v16)
     NOTIFY = 75
     VERIFY = 76
-    CHATJOIN = 150
-    CHATLEAVE = 151
-    CHATMSG = 152
+    AUTHRESP = 84       # Auth response (both YM5 and YM9)
+    LIST = 85
+    AUTH = 87           # YM5.x initial auth
+    ADDBUDDY = 131
+    REMBUDDY = 132
+    # Conference/Room Chat (services 150+)
+    CHATONLINE = 150    # 0x96 - Chat room login
+    CHATGOTO = 151      # 0x97 - Go to room
+    CHATJOIN = 152      # 0x98 - Join room
+    CHATLEAVE = 153     # 0x99 - Leave room
+    CHATMSG = 154       # 0x9a - Room message (Note: some refs say 152)
+    CHATEXIT = 155      # 0x9b - Exit chat
+    CHATADDINVITE = 157 # 0x9d - Invite to chat
+    CHATLOGOUT = 160    # 0xa0 - Chat logout
+    CHATPING = 161      # 0xa1 - Chat ping
+    # Conference services
+    CONFINVITE = 24     # 0x18 - Conference invite
+    CONFLOGON = 25      # 0x19 - Conference join
+    CONFDECLINE = 26    # 0x1a - Conference decline
+    CONFLOGOFF = 27     # 0x1b - Conference leave
+    CONFMSG = 29        # 0x1d - Conference message
 
 
 # Status constants
