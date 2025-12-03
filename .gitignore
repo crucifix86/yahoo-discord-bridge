@@ -35,3 +35,4 @@ uy-messenger/
 # OS
 .DS_Store
 Thumbs.db
+offline_messages.db

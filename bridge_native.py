@@ -15,6 +15,7 @@ import sys
 import socket
 import time
 import re
+import sqlite3
 
 
 def strip_emojis(text):
@@ -163,6 +164,82 @@ class NativeBridge:
         self.channel_map = {}  # room_name -> discord channel
         self.chat_rooms = {}   # room_name -> set of session_ids in that room
         self.session_rooms = {}  # session_id -> set of room names
+
+        # Offline message storage
+        self.db_path = '/home/doug/yahoo-discord-bridge/offline_messages.db'
+        self._init_offline_db()
+
+    def _init_offline_db(self):
+        """Initialize SQLite database for offline message storage"""
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS offline_messages
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      recipient TEXT NOT NULL,
+                      sender TEXT NOT NULL,
+                      message TEXT NOT NULL,
+                      timestamp INTEGER NOT NULL)''')
+        conn.commit()
+        conn.close()
+        logger.info(f"Offline message database initialized: {self.db_path}")
+
+    def _store_offline_message(self, recipient, sender, message):
+        """Store a message for offline delivery"""
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        timestamp = int(time.time())
+        c.execute('INSERT INTO offline_messages (recipient, sender, message, timestamp) VALUES (?, ?, ?, ?)',
+                  (recipient, sender, message, timestamp))
+        conn.commit()
+        conn.close()
+        logger.info(f"Stored offline message for {recipient} from {sender}")
+
+    def _get_offline_messages(self, recipient):
+        """Get all pending offline messages for a user"""
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        c.execute('SELECT id, sender, message, timestamp FROM offline_messages WHERE recipient = ? ORDER BY timestamp',
+                  (recipient,))
+        messages = c.fetchall()
+        conn.close()
+        return messages
+
+    def _clear_offline_messages(self, recipient):
+        """Clear offline messages after delivery"""
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        c.execute('DELETE FROM offline_messages WHERE recipient = ?', (recipient,))
+        conn.commit()
+        conn.close()
+        logger.info(f"Cleared offline messages for {recipient}")
+
+    def _deliver_offline_messages(self, session):
+        """Deliver pending offline messages to a newly logged in user"""
+        messages = self._get_offline_messages(session.username)
+        if not messages:
+            return
+
+        logger.info(f"Delivering {len(messages)} offline messages to {session.username}")
+
+        # Build offline message packet with multiple messages
+        # Format: [31][6], [32][6], [4]sender, [5]recipient, [14]message, [15]timestamp for each
+        data_list = []
+        for msg_id, sender, message, timestamp in messages:
+            # Each message has these markers
+            data_list.extend(['31', '6', '32', '6'])
+            data_list.extend(['4', sender])
+            data_list.extend(['5', session.username])
+            formatted_msg = f'<font face="Tahoma">{message}'
+            data_list.extend(['14', formatted_msg])
+            data_list.extend(['15', str(timestamp)])
+            data_list.extend(['97', '1'])
+
+        # Send as single offline message packet with status=5 (OFFLINE5)
+        session.send_packet(Service.MESSAGE, status=5, data_list=data_list)
+        logger.info(f"Sent offline messages packet to {session.username}")
+
+        # Clear delivered messages
+        self._clear_offline_messages(session.username)
 
     def start(self):
         """Start the bridge"""
@@ -537,6 +614,9 @@ class NativeBridge:
 
         # Start keepalive - server sends PING with 143=60, 144=1 to keep client connected
         session.start_keepalive()
+
+        # Deliver any pending offline messages
+        self._deliver_offline_messages(session)
 
     def _handle_authresp(self, session, packet):
         """Handle AUTHRESP from clients after challenge"""
@@ -959,8 +1039,8 @@ class NativeBridge:
             logger.error(f"Failed to send Discord DM: {e}")
 
     def _forward_to_ymsg(self, sender, message):
-        """Forward a message to connected YM clients"""
-        import time as time_module
+        """Forward a message to connected YM clients, or store offline"""
+        delivered = False
         with self.sessions_lock:
             logger.info(f"Forwarding to {len(self.sessions)} sessions")
             for session in self.sessions.values():
@@ -983,6 +1063,15 @@ class NativeBridge:
                         },
                         session_id=session.session_id
                     )
+                    delivered = True
+
+        # If no authenticated sessions, store for offline delivery
+        # Use a default recipient - in a multi-user setup you'd want to specify this
+        if not delivered:
+            # Store for any user who might log in (using 'testuser' as default)
+            # In a real setup, you'd track which Discord users map to which YM users
+            self._store_offline_message('testuser', sender, message)
+            logger.info(f"No online sessions - stored message from {sender} for offline delivery")
 
     def _notify_friend_online(self, friend, status):
         """Notify YM clients that a friend came online"""
