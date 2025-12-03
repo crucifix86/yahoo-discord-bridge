@@ -3,7 +3,7 @@
 ## Goal
 Support both Yahoo Messenger 5.x AND Yahoo Messenger 9 for chat rooms bridged to Discord.
 
-## Current Status (Updated 2025-12-03 - Session 2)
+## Current Status (Updated 2025-12-03 - Session 3)
 - **YM 5.x Login**: Working
 - **YM 5.x Buddy List**: Working
 - **YM 5.x Chat Room List**: Working (via HTTP server)
@@ -11,7 +11,8 @@ Support both Yahoo Messenger 5.x AND Yahoo Messenger 9 for chat rooms bridged to
 - **YM 9 Login**: WORKING!
 - **YM 9 Buddy List**: WORKING! (shows all Discord friends)
 - **YM 9 Status Updates**: WORKING! (structured STATUS_15 format)
-- **YM 9 Keepalive**: Improved (5 min timeout, PING handling added)
+- **YM 9 Keepalive**: FIXED! (STATUS_15 status=0 triggers keepalive timer)
+- **YM 9 1:1 Messaging**: WORKING! (cosmetic warning but messages delivered)
 
 ---
 
@@ -90,36 +91,23 @@ LIST_15 requires structured entries with duplicate keys. Added `data_list` suppo
 
 ---
 
-## Phase 1.6: YM 9 Keepalive - KNOWN LIMITATION
+## Phase 1.6: YM 9 Keepalive - FIXED!
 
-### Current Behavior
-- YM9 disconnects after ~60 seconds of idle time
-- Client automatically reconnects ~20 seconds after disconnect
-- This appears to be application-level behavior, not fixable from server side
+### Solution Found
+The fix was changing `STATUS_15` packets from `status=1` to `status=0`.
 
-### Attempted Solutions (None Worked)
-- PING (service 18) with 143=60, 144=1 - no effect
-- KEEPALIVE (service 138) - sent at various intervals, doesn't prevent timeout
-- Various timing intervals - 10s, 15s, 20s, 30s, 45s, 50s - none helped
-- Responding to SKINNAME (service 21) telemetry packets
-- Responding to Y7_CHAT_SESSION (service 212) packets
-- TCP socket keepalive at OS level
+The YM9 client uses `status=0` in STATUS_15 as the "login complete" signal to start its keepalive timer. With `status=1`, the client thought login wasn't complete and would timeout after 60 seconds.
 
-### Technical Notes from OpenYMSG Research
-- According to OpenYMSG source code:
-  - CLIENT sends KEEPALIVE (138) to SERVER every 60 seconds
-  - SERVER sends PING (18) with 143="60", 144="1" after login
-  - Client considers login complete after receiving LIST_15 with status=0
-- YM9 client is NOT sending us KEEPALIVE packets - instead it disconnects
-- This suggests client isn't starting its keepalive timer after login
-- The 60-second timeout matches OpenYMSG's KEEPALIVE_TIMEOUT_IN_SECS constant
-- Client reconnects automatically (~20s after disconnect), so functionally it works
-- Further investigation would require reverse-engineering the YM9 client binary
+### What Works Now
+- YM9 stays connected indefinitely
+- No more 60-second disconnects
+- Client sends proper KEEPALIVE packets
+- 1:1 messaging works (with cosmetic "may not have received" warning)
 
-### Workaround
-- Accept the 60-second reconnect cycle
-- Messages work, buddy list works, statuses work
-- User just sees periodic disconnect/reconnect
+### Remaining Issue
+- "Your contact may not have received this message" warning appears
+- This is cosmetic only - messages ARE delivered and work perfectly
+- Would require reverse engineering YM9 binary to find exact ACK format expected
 
 ---
 
