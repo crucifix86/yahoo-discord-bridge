@@ -12,7 +12,7 @@ Support both Yahoo Messenger 5.x AND Yahoo Messenger 9 for chat rooms bridged to
 - **YM 9 Buddy List**: WORKING! (shows all Discord friends)
 - **YM 9 Status Updates**: WORKING! (structured STATUS_15 format)
 - **YM 9 Keepalive**: FIXED! (STATUS_15 status=0 triggers keepalive timer)
-- **YM 9 1:1 Messaging**: WORKING! (cosmetic warning but messages delivered)
+- **YM 9 1:1 Messaging**: WORKING! (MESSAGE_ACK eliminates delivery warning)
 
 ---
 
@@ -104,10 +104,12 @@ The YM9 client uses `status=0` in STATUS_15 as the "login complete" signal to st
 - Client sends proper KEEPALIVE packets
 - 1:1 messaging works (with cosmetic "may not have received" warning)
 
-### Remaining Issue
-- "Your contact may not have received this message" warning appears
-- This is cosmetic only - messages ARE delivered and work perfectly
-- Would require reverse engineering YM9 binary to find exact ACK format expected
+### Message ACK - FIXED!
+- "Your contact may not have received this message" warning ELIMINATED
+- Solution: Send MESSAGE_ACK (service 251) with correct field orientation
+  - Field 1 = recipient (who "received" the message)
+  - Field 5 = sender (who needs delivery confirmation)
+- Based on OpenYMSG MessageAckMessage format
 
 ---
 
