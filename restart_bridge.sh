@@ -8,15 +8,18 @@ stop_servers() {
     echo "Stopping bridge servers..."
     sudo pkill -9 -f "python.*bridge_native.py" 2>/dev/null
     sudo pkill -9 -f "python.*http_server.py" 2>/dev/null
+    sudo pkill -9 -f "python.*https_auth_server.py" 2>/dev/null
     sleep 2
 
     # Force kill anything on our ports
     sudo fuser -k 5050/tcp 2>/dev/null
+    sudo fuser -k 5101/tcp 2>/dev/null
     sudo fuser -k 80/tcp 2>/dev/null
+    sudo fuser -k 443/tcp 2>/dev/null
     sleep 1
 
     # Wait for ports to be free
-    while sudo ss -tlnp | grep -qE ':(5050|80)\s'; do
+    while sudo ss -tlnp | grep -qE ':(5050|5101|80|443)\s'; do
         echo "Waiting for ports to clear..."
         sleep 1
     done
@@ -34,11 +37,21 @@ start_servers() {
     sudo $VENV_PYTHON http_server.py >> http.log 2>&1 &
     sleep 2
 
-    # Verify both are running
+    echo "Starting HTTPS auth server (port 443)..."
+    sudo $VENV_PYTHON https_auth_server.py >> https_auth.log 2>&1 &
+    sleep 2
+
+    # Verify all are running
     if sudo ss -tlnp | grep -q ':5050'; then
         echo "YMSG bridge running on port 5050"
     else
-        echo "WARNING: YMSG bridge failed to start!"
+        echo "WARNING: YMSG bridge failed to start on 5050!"
+    fi
+
+    if sudo ss -tlnp | grep -q ':5101'; then
+        echo "Chat server running on port 5101"
+    else
+        echo "WARNING: Chat server failed to start on 5101!"
     fi
 
     if sudo ss -tlnp | grep -q ':80\s'; then
@@ -47,10 +60,17 @@ start_servers() {
         echo "WARNING: HTTP server failed to start!"
     fi
 
+    if sudo ss -tlnp | grep -q ':443\s'; then
+        echo "HTTPS auth server running on port 443"
+    else
+        echo "WARNING: HTTPS auth server failed to start!"
+    fi
+
     echo ""
     echo "Servers started. Check logs with:"
     echo "  tail -f $SCRIPT_DIR/bridge.log"
     echo "  tail -f $SCRIPT_DIR/http.log"
+    echo "  tail -f $SCRIPT_DIR/https_auth.log"
 }
 
 status() {
@@ -61,13 +81,19 @@ status() {
         echo "YMSG Bridge (5050): STOPPED"
     fi
 
+    if sudo ss -tlnp | grep -q ':5101'; then
+        echo "Chat Server (5101): RUNNING"
+    else
+        echo "Chat Server (5101): STOPPED"
+    fi
+
     if sudo ss -tlnp | grep -q ':80\s'; then
         echo "HTTP Server (80):   RUNNING"
     else
         echo "HTTP Server (80):   STOPPED"
     fi
     echo ""
-    sudo ss -tlnp | grep -E ':(5050|80)\s' 2>/dev/null
+    sudo ss -tlnp | grep -E ':(5050|5101|80)\s' 2>/dev/null
 }
 
 case "$1" in

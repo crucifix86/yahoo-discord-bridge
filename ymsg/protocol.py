@@ -28,12 +28,14 @@ class YMSGPacket:
     """Represents a YMSG protocol packet"""
 
     def __init__(self, service: int = 0, status: int = 0,
-                 session_id: int = 0, data: Dict[str, str] = None):
+                 session_id: int = 0, data: Dict[str, str] = None,
+                 data_list: List[str] = None):
         self.version = YMSG_VERSION
         self.service = service
         self.status = status
         self.session_id = session_id
         self.data = data or {}
+        self.data_list = data_list  # For packets with duplicate keys
 
     def __repr__(self):
         return (f"YMSGPacket(service={self.service}, status={self.status}, "
@@ -77,7 +79,11 @@ def decode_data(data: bytes) -> Dict[str, str]:
 
 def encode_packet(packet: YMSGPacket) -> bytes:
     """Encode a YMSGPacket into bytes for transmission"""
-    data_bytes = encode_data(packet.data)
+    # Use data_list for duplicate keys, otherwise use dict
+    if packet.data_list:
+        data_bytes = encode_data_list(packet.data_list)
+    else:
+        data_bytes = encode_data(packet.data)
     data_len = len(data_bytes)
 
     # Build header (20 bytes)
@@ -181,6 +187,12 @@ class Service:
     LIST = 85
     AUTH = 87           # YM5.x initial auth
     ADDBUDDY = 131
+    # v15/v16 specific service codes
+    SKINNAME = 21       # 0x15 - Client telemetry/settings
+    KEEPALIVE = 138     # 0x8a - Keep alive for v16+ (replaces PING)
+    Y7_CHAT_SESSION = 212  # 0xd4 - Y7 chat session
+    STATUS_15 = 240     # 0xf0 - Status update for v15+
+    LIST_15 = 241       # 0xf1 - Buddy list for v15+
     REMBUDDY = 132
     # Conference/Room Chat (services 150+)
     CHATONLINE = 150    # 0x96 - Chat room login
