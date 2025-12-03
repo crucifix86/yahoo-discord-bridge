@@ -513,7 +513,7 @@ class NativeBridge:
                     '244', '6',                   # Some value
                     '301', '315', '303', '315'    # End entry
                 ]
-                session.send_packet(Service.STATUS_15, status=1, data_list=status_items)
+                session.send_packet(Service.STATUS_15, status=0, data_list=status_items)
             logger.info(f"Sent {len(online_friends)} STATUS_15 packets (structured) for v16 client")
         else:
             for friend in online_friends:
@@ -584,12 +584,27 @@ class NativeBridge:
         logger.info(f"Received MESSAGE packet keys: {list(packet.data.keys())}")
         logger.info(f"Received MESSAGE packet data: {packet.data}")
 
+        from_user = packet.data.get('1', session.username)
         to_user = packet.data.get('5', '')
         raw_message = packet.data.get('14', '')
         message = strip_yahoo_formatting(raw_message)
         message = yahoo_to_discord(message)
 
         logger.info(f"Message from {session.username} to {to_user}: {message}")
+
+        # Send acknowledgement (SERVICE_ACK = status 1)
+        # Echo back key fields so client knows which message was acked
+        ack_data = {
+            '1': from_user,
+            '5': to_user,
+        }
+        # Include message ID fields if present
+        if '429' in packet.data:
+            ack_data['429'] = packet.data['429']
+        if '450' in packet.data:
+            ack_data['450'] = packet.data['450']
+        session.send_packet(Service.MESSAGE, status=1, data=ack_data)
+        logger.info(f"Sent MESSAGE ACK for {from_user} -> {to_user}")
 
         # Forward to Discord
         if to_user in self.friend_users and self.discord_client:

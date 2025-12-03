@@ -122,6 +122,8 @@ class YahooAuthHandler(http.server.BaseHTTPRequestHandler):
         crumb = hashlib.md5(token.encode()).hexdigest()[:16]
         y_cookie = f"v=1&n={username}&l={username}/o/1&p=ymsgr&r=fg&intl=us"
         t_cookie = f"z={hashlib.md5((token+'T').encode()).hexdigest()}&a=QAE&sk={hashlib.md5((token+'SK').encode()).hexdigest()[:24]}&d=c2k9"
+        # B cookie - docs say this should be in Set-Cookie header
+        b_cookie = f"abc123&b=456def&s=sg"
 
         # Use \r\n line endings for Windows
         response = f"0\r\ncrumb={crumb}\r\nY={y_cookie}\r\nT={t_cookie}\r\ncookievalidfor=86400\r\n"
@@ -130,6 +132,10 @@ class YahooAuthHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header('Content-type', 'text/plain')
         self.send_header('Content-Length', str(len(response)))
+        # Add Set-Cookie headers for B, Y, T cookies (v17 might need these)
+        self.send_header('Set-Cookie', f'B={b_cookie}; path=/; domain=.yahoo.com')
+        self.send_header('Set-Cookie', f'Y={y_cookie}; path=/; domain=.yahoo.com')
+        self.send_header('Set-Cookie', f'T={t_cookie}; path=/; domain=.yahoo.com')
         self.end_headers()
         self.wfile.write(response.encode())
 
