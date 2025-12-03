@@ -193,6 +193,7 @@ class Service:
     Y7_CHAT_SESSION = 212  # 0xd4 - Y7 chat session
     STATUS_15 = 240     # 0xf0 - Status update for v15+
     LIST_15 = 241       # 0xf1 - Buddy list for v15+
+    MESSAGE_ACK = 251   # 0xfb - Message acknowledgement (v16)
     REMBUDDY = 132
     # Conference/Room Chat (services 150+)
     CHATONLINE = 150    # 0x96 - Chat room login

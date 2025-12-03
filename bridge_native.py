@@ -592,18 +592,20 @@ class NativeBridge:
 
         logger.info(f"Message from {session.username} to {to_user}: {message}")
 
-        # Send acknowledgement (SERVICE_ACK = status 1)
-        # Use field 4 for sender (like incoming messages do) and echo back key fields
+        # Send MESSAGE_ACK (service 251/0xfb) - fake ACK from recipient
+        # The ACK should look like it's FROM the recipient TO the sender
+        # This tells the client "the recipient got your message"
+        message_id = packet.data.get('429', '')
         ack_data = {
-            '4': from_user,  # Field 4 for sender (like incoming msgs use)
-            '5': to_user,
+            '1': to_user,      # Field 1 = recipient (who "received" the message)
+            '5': from_user,    # Field 5 = sender (who needs confirmation)
+            '302': '430',
+            '430': message_id,
+            '303': '430',
+            '450': '0',
         }
-        # Echo back all relevant fields
-        for key in ['97', '63', '64', '206', '429', '450', '455']:
-            if key in packet.data:
-                ack_data[key] = packet.data[key]
-        session.send_packet(Service.MESSAGE, status=1, data=ack_data)
-        logger.info(f"Sent MESSAGE ACK for {from_user} -> {to_user}")
+        session.send_packet(Service.MESSAGE_ACK, status=0, data=ack_data)
+        logger.info(f"Sent MESSAGE_ACK (fake from {to_user}) for msgid={message_id}")
 
         # Forward to Discord
         if to_user in self.friend_users and self.discord_client:
