@@ -593,16 +593,15 @@ class NativeBridge:
         logger.info(f"Message from {session.username} to {to_user}: {message}")
 
         # Send acknowledgement (SERVICE_ACK = status 1)
-        # Echo back key fields so client knows which message was acked
+        # Use field 4 for sender (like incoming messages do) and echo back key fields
         ack_data = {
-            '1': from_user,
+            '4': from_user,  # Field 4 for sender (like incoming msgs use)
             '5': to_user,
         }
-        # Include message ID fields if present
-        if '429' in packet.data:
-            ack_data['429'] = packet.data['429']
-        if '450' in packet.data:
-            ack_data['450'] = packet.data['450']
+        # Echo back all relevant fields
+        for key in ['97', '63', '64', '206', '429', '450', '455']:
+            if key in packet.data:
+                ack_data[key] = packet.data[key]
         session.send_packet(Service.MESSAGE, status=1, data=ack_data)
         logger.info(f"Sent MESSAGE ACK for {from_user} -> {to_user}")
 
