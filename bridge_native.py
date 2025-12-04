@@ -170,18 +170,28 @@ class NativeBridge:
         self._init_offline_db()
 
     def _init_offline_db(self):
-        """Initialize SQLite database for offline message storage"""
+        """Initialize SQLite database for offline messages and chat history"""
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
+        # Offline messages (delivered once then cleared)
         c.execute('''CREATE TABLE IF NOT EXISTS offline_messages
                      (id INTEGER PRIMARY KEY AUTOINCREMENT,
                       recipient TEXT NOT NULL,
                       sender TEXT NOT NULL,
                       message TEXT NOT NULL,
                       timestamp INTEGER NOT NULL)''')
+        # Permanent chat history (persists forever)
+        c.execute('''CREATE TABLE IF NOT EXISTS chat_history
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      user1 TEXT NOT NULL,
+                      user2 TEXT NOT NULL,
+                      sender TEXT NOT NULL,
+                      message TEXT NOT NULL,
+                      timestamp INTEGER NOT NULL)''')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_chat_users ON chat_history(user1, user2)')
         conn.commit()
         conn.close()
-        logger.info(f"Offline message database initialized: {self.db_path}")
+        logger.info(f"Message database initialized: {self.db_path}")
 
     def _store_offline_message(self, recipient, sender, message):
         """Store a message for offline delivery"""
@@ -212,6 +222,57 @@ class NativeBridge:
         conn.commit()
         conn.close()
         logger.info(f"Cleared offline messages for {recipient}")
+
+    def _store_chat_history(self, user1, user2, sender, message):
+        """Store a message in permanent chat history"""
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        timestamp = int(time.time())
+        # Always store with users in sorted order for consistent lookups
+        sorted_users = sorted([user1, user2])
+        c.execute('INSERT INTO chat_history (user1, user2, sender, message, timestamp) VALUES (?, ?, ?, ?, ?)',
+                  (sorted_users[0], sorted_users[1], sender, message, timestamp))
+        conn.commit()
+        conn.close()
+
+    def _get_chat_history(self, user1, user2, limit=50):
+        """Get chat history between two users (most recent first)"""
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        sorted_users = sorted([user1, user2])
+        c.execute('''SELECT sender, message, timestamp FROM chat_history
+                     WHERE user1 = ? AND user2 = ?
+                     ORDER BY timestamp DESC LIMIT ?''',
+                  (sorted_users[0], sorted_users[1], limit))
+        messages = c.fetchall()
+        conn.close()
+        # Return in chronological order (oldest first)
+        return list(reversed(messages))
+
+    def _send_chat_history(self, session, other_user):
+        """Send chat history to user when they open a conversation"""
+        history = self._get_chat_history(session.username, other_user, limit=50)
+        if not history:
+            logger.info(f"No chat history between {session.username} and {other_user}")
+            return
+
+        logger.info(f"Sending {len(history)} history messages for {session.username} <-> {other_user}")
+
+        # Send each historical message
+        for sender, message, timestamp in history:
+            formatted_msg = f'<font face="Tahoma">{message}'
+            # Send as offline messages with timestamps so they appear as history
+            data_list = [
+                '31', '6', '32', '6',
+                '4', sender,
+                '5', session.username,
+                '14', formatted_msg,
+                '15', str(timestamp),
+                '97', '1'
+            ]
+            session.send_packet(Service.MESSAGE, status=5, data_list=data_list)
+
+        logger.info(f"Sent chat history to {session.username}")
 
     def _deliver_offline_messages(self, session):
         """Deliver pending offline messages to a newly logged in user"""
@@ -652,11 +713,17 @@ class NativeBridge:
 
     def _handle_y7_chat_session(self, session, packet):
         """Handle Y7_CHAT_SESSION (service 212) - chat session init
-        YM9 sends this after login. Send acknowledgement.
+        YM9 sends this when opening a conversation window.
+        Echo back the fields to acknowledge the session.
         """
         logger.info(f"Y7_CHAT_SESSION received from {session.username}: {packet.data}")
-        # Echo back as acknowledgement
-        session.send_packet(Service.Y7_CHAT_SESSION, status=0, data={})
+        # Echo back the same fields as acknowledgement
+        response_data = {
+            '1': session.username,
+            '5': packet.data.get('5', ''),
+            '13': packet.data.get('13', '1'),
+        }
+        session.send_packet(Service.Y7_CHAT_SESSION, status=0, data=response_data)
 
     def _handle_message(self, session, packet):
         """Handle message from YM -> Discord"""
@@ -671,6 +738,10 @@ class NativeBridge:
         message = yahoo_to_discord(message)
 
         logger.info(f"Message from {session.username} to {to_user}: {message}")
+
+        # Store in chat history (raw message without formatting for clean storage)
+        if to_user:
+            self._store_chat_history(session.username, to_user, session.username, message)
 
         # Send MESSAGE_ACK (service 251/0xfb) - fake ACK from recipient
         # The ACK should look like it's FROM the recipient TO the sender
@@ -727,10 +798,10 @@ class NativeBridge:
             room_indicator = packet.data.get('6', 'abcde')
             logger.info(f"CHATONLINE: {username} going online for chat (indicator={room_indicator})")
 
-            # Try responding with success status=1 and echo back some keys
+            # Respond with status=0 for success (status=1 means away/brb)
             session.send_packet(
                 Service.CHATONLINE,  # 150
-                status=1,  # Try status=1 for success
+                status=0,  # 0 = success, 1 = away
                 data={
                     '0': '1',  # Success flag
                     '1': session.username,
@@ -738,7 +809,7 @@ class NativeBridge:
                 },
                 session_id=session.session_id
             )
-            logger.info(f"Sent CHATONLINE ack (status=1) for {session.username}")
+            logger.info(f"Sent CHATONLINE ack (status=0) for {session.username}")
 
     def _handle_chatjoin(self, session, packet):
         """Handle chat room join request (service 152)"""
@@ -824,8 +895,11 @@ class NativeBridge:
         if channel:
             self.channel_map[channel_key] = channel
 
-        # Use EXACT room name from client - don't modify it
-        lobby_name = room_name
+        # Add lobby suffix :1 for proper chat room format
+        if ':' not in room_name:
+            lobby_name = f"{room_name}:1"
+        else:
+            lobby_name = room_name
 
         # According to libyahoo2 source, CHATJOIN response must include:
         # - Field 104: room name
@@ -837,48 +911,54 @@ class NativeBridge:
         # - Field 141: member alias (optional)
         # - Field 142: member location (optional)
         # - Field 130: first join indicator (1 = yes)
-        #
-        # Note: NOT sending CHATGOTO - YM 5.x handles chat on the same connection
 
-        # CHATJOIN (152) - Multi-packet response for YM 5.x
-        # Wireshark shows status=5 means "CONTINUED/More Packets"
-        # Send packet 1 with room info (status=5), then packet 2 with members (status=1)
+        # CHATJOIN (152) response format based on YMSG protocol analysis:
+        # Field 1: username
+        # Field 104: room_name (with :1 lobby suffix)
+        # Field 129: username (confirms who joined)
+        # Field 62: 2 (join indicator - MUST be echoed back)
+        # Plus room info fields
 
-        # Packet 1: Room info with status=5 (more coming)
-        room_info = {
-            '1': session.username,
-            '104': lobby_name,
-            '105': topic[:100] if topic else 'Chat',
-            '129': room_id if room_id else '1',
-            '62': '2',
-            '108': '1',  # 1 member
-        }
+        # NOTE: CHATLOGON (29/0x1D) is for LEGACY chat (YM5), not YM9
+        # YM9 expects just CHATJOIN (152) response - don't send legacy packets
+
+        # Send CHATJOIN (152) response with documented fields from libyahoo2
+        # Fields: 1=identity, 104=room, 129=category, 105=topic, 108=members,
+        #         130=firstjoin, then for EACH member: 109=user, 110=age, 113=flags, 141=alias, 142=loc
+        # Using data_list for proper field ordering and multiple member blocks
+        room_category = room_id if room_id else base_room_name
+
+        # Build member list - include joining user plus some fake room members
+        fake_members = ['YahooChatBot', 'RoomModerator']  # Placeholder members
+        all_members = [session.username] + fake_members
+        member_count = len(all_members)
+
+        response_list = [
+            '1', session.username,           # User identity (who is joining)
+            '104', lobby_name,               # Room name with :1 suffix
+            '129', room_category,            # Room category/ID
+            '105', topic[:100] if topic else 'Discord Chat',  # Room topic
+            '108', str(member_count),        # Number of members (must match!)
+            '130', '1',                      # First join = yes
+        ]
+
+        # Add a block of 109/110/113/141/142 for EACH member
+        for member in all_members:
+            response_list.extend([
+                '109', member,    # Member username
+                '110', '0',       # Age
+                '113', '0',       # Attributes/flags (0=normal)
+                '141', member,    # Alias
+                '142', '',        # Location
+            ])
+
         session.send_packet(
             Service.CHATJOIN,
-            status=5,  # CONTINUED - more packets coming
-            data=room_info,
+            status=0,  # 0 = success
+            data_list=response_list,
             session_id=session.session_id
         )
-        logger.info(f"Sent CHATJOIN(152) status=5 (continued) room='{lobby_name}'")
-
-        # Packet 2: Member list with status=1 (final)
-        member_info = {
-            '1': session.username,
-            '104': lobby_name,
-            '109': session.username,
-            '110': '0',
-            '113': '0',
-            '141': session.username,
-            '142': '',
-            '130': '1',
-        }
-        session.send_packet(
-            Service.CHATJOIN,
-            status=1,  # Final packet
-            data=member_info,
-            session_id=session.session_id
-        )
-        logger.info(f"Sent CHATJOIN(152) status=1 (final) room='{lobby_name}'")
+        logger.info(f"Sent CHATJOIN(152) status=0 room='{lobby_name}' with {member_count} members")
 
     async def _send_discord_channel_msg(self, room_name, message):
         """Send message to Discord channel"""
@@ -1063,6 +1143,8 @@ class NativeBridge:
                         },
                         session_id=session.session_id
                     )
+                    # Store in chat history
+                    self._store_chat_history(session.username, sender, sender, message)
                     delivered = True
 
         # If no authenticated sessions, store for offline delivery

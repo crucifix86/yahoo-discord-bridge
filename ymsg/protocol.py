@@ -177,8 +177,8 @@ class Service:
     IDDEACT = 8
     PING = 18
     # Legacy Chat (services 30-32)
-    CHATLOGON = 30      # 0x1e - Legacy chat login
-    CHATLOGOFF = 31     # 0x1f - Legacy chat logout
+    CHATLOGON = 29      # 0x1d - Legacy chat login
+    CHATLOGOFF = 30     # 0x1e - Legacy chat logout
     CHATMSG_LEGACY = 32 # 0x20 - Legacy chat message
     AUTH_V16 = 57       # YM9+ initial auth (YMSG v16)
     NOTIFY = 75

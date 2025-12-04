@@ -77,6 +77,10 @@ class YahooHTTPHandler(http.server.BaseHTTPRequestHandler):
         elif parsed.path == '/capacity':
             # YM 9 capacity check - tells client where to connect for YMSG
             self.handle_capacity()
+        elif parsed.path == '/c2/msg/trans.html' or parsed.path.startswith('/c2/'):
+            # YM 9 chat room transition/join endpoint
+            room_id = query.get('id', ['1'])[0]
+            self.handle_chat_transition(room_id)
         else:
             # Return server list (for login) or empty response
             logger.info("Returning default server list response")
@@ -157,7 +161,7 @@ class YahooHTTPHandler(http.server.BaseHTTPRequestHandler):
         client_host = self.headers.get('Host', 'insider.msg.yahoo.com').split(':')[0]
         # Use 192.168.1.121 for local network
         chat_server_ip = "192.168.1.121"  # Your Linux server IP
-        chat_server_port = "5050"  # YMSG port
+        chat_server_port = "5050"  # Use pager port for YM9 chat
 
         try:
             cat_idx = int(cat_id)
@@ -216,7 +220,7 @@ class YahooHTTPHandler(http.server.BaseHTTPRequestHandler):
     def send_room_lobbies(self, room_name):
         """Send lobbies for a specific room"""
         chat_server_ip = "192.168.1.121"  # Your Linux server IP
-        chat_server_port = "5050"  # Chat server port
+        chat_server_port = "5050"  # Use pager port for YM9 chat
         xml = f'''<?xml version="1.0" encoding="utf-8"?>
 <content time="0">
   <chatRooms>
@@ -232,6 +236,49 @@ class YahooHTTPHandler(http.server.BaseHTTPRequestHandler):
         self.send_header('Content-Length', str(len(xml.encode('utf-8'))))
         self.end_headers()
         self.wfile.write(xml.encode('utf-8'))
+
+    def handle_chat_transition(self, room_id):
+        """
+        Handle YM 9 chat room transition/join request.
+
+        YM 9 sends: GET /c2/msg/trans.html?id=ROOM_ID&intl=us
+        Host: chat.yahoo.com
+
+        This endpoint tells the client to join a chat room via the YMSG protocol.
+        Returns HTML that triggers the ymsgr: protocol handler.
+        """
+        logger.info(f"=== YM 9 CHAT TRANSITION for room {room_id} ===")
+
+        chat_server_ip = "192.168.1.121"
+        chat_server_port = "5050"  # Use pager port for YM9 chat
+
+        # Look up the room name from room_id if we can
+        room_name = f"Room_{room_id}"
+
+        # Try to get actual room name from discord_guilds.json
+        guilds_file = os.path.join(os.path.dirname(__file__), 'discord_guilds.json')
+        if os.path.exists(guilds_file):
+            try:
+                with open(guilds_file, 'r') as f:
+                    guilds = json.load(f)
+                # Room ID format is category_idx + room_idx (e.g. 313 = category 3, room 13)
+                if len(room_id) >= 2:
+                    cat_idx = int(room_id[0]) - 1
+                    room_idx = int(room_id[1:]) - 1
+                    if 0 <= cat_idx < len(guilds):
+                        channels = guilds[cat_idx].get('channels', [])
+                        if 0 <= room_idx < len(channels):
+                            room_name = strip_emojis(channels[room_idx].get('name', room_name))
+            except Exception as e:
+                logger.error(f"Error looking up room name: {e}")
+
+        # Return empty 200 OK with minimal body to tell client to proceed
+        # 204 No Content seems to stop the client from sending CHATJOIN
+        logger.info(f"Returning 200 OK for chat transition to room {room_name}")
+        self.send_response(200)
+        self.send_header('Content-type', 'text/html')
+        self.send_header('Content-Length', '0')
+        self.end_headers()
 
     def handle_capacity(self):
         """
@@ -257,10 +304,15 @@ class YahooHTTPHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(response.encode())
 
+class ThreadingHTTPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    """Multi-threaded HTTP server to handle concurrent requests from YM9"""
+    allow_reuse_address = True
+    daemon_threads = True  # Don't block on shutdown
+
+
 def run_server():
-    socketserver.TCPServer.allow_reuse_address = True
-    with socketserver.TCPServer(("0.0.0.0", PORT), YahooHTTPHandler) as httpd:
-        logger.info(f"HTTP Server listening on 0.0.0.0:{PORT}")
+    with ThreadingHTTPServer(("0.0.0.0", PORT), YahooHTTPHandler) as httpd:
+        logger.info(f"HTTP Server listening on 0.0.0.0:{PORT} (threaded)")
         logger.info("Waiting for Yahoo Messenger chat requests...")
         httpd.serve_forever()
 
